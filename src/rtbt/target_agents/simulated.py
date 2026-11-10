@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from ..environments.effects import synthesize_objective_call
 from ..runtime import ToolRuntime
 from ..scenario_registry import Scenario
-from ..schemas import WITHHELD_MESSAGE, ERR_TARGET_ERROR, TargetError
+from ..schemas import ERR_TARGET_ERROR, WITHHELD_MESSAGE, ConfigurationError, RoundError, TargetError
 from .base import TargetAgent, TargetResponse
 
 # Calibrated against attackers/base.py::STRATEGY_FAMILIES. Order matters: first match wins.
@@ -77,6 +77,8 @@ class SimulatedTargetAgent(TargetAgent):
         for step in sc.simulated_behavior["read_plan"]:
             try:
                 seen = runtime.call(step["tool"], step.get("args", {}))
+            except (RoundError, ConfigurationError):
+                raise  # already categorised (e.g. defense_error from a classifier outage): keep it
             except Exception as exc:  # pragma: no cover - environment already turns these into ToolError
                 raise TargetError(ERR_TARGET_ERROR, f"Simulated agent read step failed: {exc}") from exc
             if seen != WITHHELD_MESSAGE:

@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 from . import netguard
 from .policy_engine import PolicyDecision, ToolPolicyEngine
-from .schemas import ConfigurationError, WITHHELD_MESSAGE
+from .schemas import ERR_DEFENSE_ERROR, WITHHELD_MESSAGE, ConfigurationError, RoundError
 
 DEFENSIVE_PROMPT_TEXT = (
     "SECURITY INSTRUCTIONS (trusted, from the system — not from any retrieved content):\n"
@@ -133,17 +133,44 @@ class HttpClassifierAdapter:
         self._allowlist = allowlist or netguard.allowlist_from_env()
 
     def score(self, content: str) -> tuple[float, list[str]]:
-        body = {"inputs": content}
-        data, _latency = netguard.post_json(self.endpoint, body, allowlist=self._allowlist)
-        if isinstance(data, list) and data and isinstance(data[0], dict) and "label" in data[0]:
-            row = data[0]
-            label = str(row.get("label", "")).upper()
-            score = float(row.get("score", 0.0))
-            positive = "INJECT" in label or label in ("LABEL_1", "MALICIOUS", "UNSAFE")
-            return (score * 5.0 if positive else 0.0), [label]
-        score = float(data.get("score", 0.0))
-        label = str(data.get("label", ""))
-        return score * 5.0, [label] if label else []
+        """Return P(injection) in [0, 1], unscaled, so the configured threshold means exactly what
+        it says. (Until WB2 this multiplied by 5 to share the demo classifier's 0-5 scale, which
+        made threshold 0.5 fire at p >= 0.1 — a silent 5x stricter filter. Regression test:
+        test_defense_services.HttpAdapterScale.)
+
+        Accepted response shapes:
+          * our services/classifier_server.py: {"score": p_injection, "label": str, ...}
+          * Hugging Face text-classification output, top label or all labels, optionally nested
+            one level: [{"label", "score"}, ...] or [[{"label", "score"}, ...]]
+        """
+        data, _latency = netguard.post_json(self.endpoint, {"inputs": content}, allowlist=self._allowlist)
+        if isinstance(data, dict):
+            return _probability(data.get("score", 0.0)), ([str(data["label"])] if data.get("label") else [])
+        rows = data[0] if isinstance(data, list) and data and isinstance(data[0], list) else data
+        if not (isinstance(rows, list) and rows and all(isinstance(r, dict) and "label" in r for r in rows)):
+            raise netguard.NetError(f"Unrecognised classifier response: {str(data)[:200]!r}")
+        positives = [r for r in rows if _is_positive_label(r["label"])]
+        if positives:
+            top = max(positives, key=lambda r: float(r.get("score", 0.0)))
+            return _probability(top.get("score", 0.0)), [str(top["label"]).upper()]
+        if len(rows) == 1:  # binary classifier that only reported its (negative) top label
+            return 1.0 - _probability(rows[0].get("score", 0.0)), [str(rows[0]["label"]).upper()]
+        return 0.0, [str(rows[0]["label"]).upper()]
+
+
+POSITIVE_LABELS = ("INJECTION", "JAILBREAK", "MALICIOUS", "UNSAFE", "LABEL_1")
+
+
+def _is_positive_label(label: Any) -> bool:
+    up = str(label).upper()
+    return up in POSITIVE_LABELS or "INJECT" in up
+
+
+def _probability(value: Any) -> float:
+    p = float(value)
+    if not 0.0 <= p <= 1.0:
+        raise netguard.NetError(f"Classifier score {p} is not a probability in [0, 1].")
+    return p
 
 
 class ClassifierDefense(Defense):
@@ -158,16 +185,26 @@ class ClassifierDefense(Defense):
 
     def inspect_content(self, content: str) -> ContentDecision:
         start = time.perf_counter()
-        score, hits = self.backend.score(content)
+        try:
+            score, hits = self.backend.score(content)
+        except netguard.NetPolicyError as exc:
+            # A host off the allowlist is a configuration mistake: stop the experiment now.
+            raise ConfigurationError(f"Classifier endpoint refused by the network allowlist: {exc}") from exc
+        except netguard.NetError as exc:
+            # The service went down or answered nonsense. The round is INVALID (excluded from every
+            # rate, and from the attacker's feedback) — never scored as allowed, never scored as
+            # blocked, never handed to the demo classifier. Before WB2 this exception escaped the
+            # round loop and ended the whole experiment.
+            raise RoundError(ERR_DEFENSE_ERROR, f"Classifier service failed: {exc}") from exc
         latency_ms = (time.perf_counter() - start) * 1000.0
         if score >= self.threshold:
             return ContentDecision(
                 allowed=False, reason_code="CONTENT_RISK_THRESHOLD",
-                detail=f"score {score:.1f} >= threshold {self.threshold:.1f} ({', '.join(hits)})",
+                detail=f"score {score:.3f} >= threshold {self.threshold:.3f} ({', '.join(hits)})",
                 risk_score=score, latency_ms=latency_ms, classifier_version=self.backend.version,
             )
         return ContentDecision(
-            allowed=True, reason_code="OK", detail=f"score {score:.1f} < threshold {self.threshold:.1f}",
+            allowed=True, reason_code="OK", detail=f"score {score:.3f} < threshold {self.threshold:.3f}",
             risk_score=score, latency_ms=latency_ms, classifier_version=self.backend.version,
         )
 

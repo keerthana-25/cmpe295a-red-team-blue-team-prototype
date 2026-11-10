@@ -14,6 +14,7 @@ from _common import (ATTACKER_ADDRESS, OBVIOUS_PAYLOAD, QUIET_PAYLOAD, ROOT, SUI
 
 from rtbt import netguard
 from rtbt import statistics as stats
+from rtbt.schemas import RoundError  # noqa: E402
 from rtbt.defenses import ClassifierDefense, HttpClassifierAdapter, benign_block_rate, build_defense
 from rtbt.environments import environment_class
 from rtbt.metrics import compute_campaign_metrics, final_window_size, matched_budget_ok
@@ -234,8 +235,9 @@ class DefenseTests(unittest.TestCase):
     def test_http_classifier_never_silently_falls_back_to_the_demo(self):
         defense = ClassifierDefense(backend=HttpClassifierAdapter("http://127.0.0.1:1/x", "m"), threshold=0.5)
         with mock.patch("rtbt.netguard.post_json", side_effect=netguard.NetError("down")):
-            with self.assertRaises(netguard.NetError):
+            with self.assertRaises(RoundError) as ctx:  # an invalid round, not a demo-scored one
                 defense.inspect_content("anything")
+        self.assertEqual(ctx.exception.category, "defense_error")
 
 
 class RuntimeTests(unittest.TestCase):
