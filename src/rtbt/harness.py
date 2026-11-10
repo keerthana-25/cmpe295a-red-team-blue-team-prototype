@@ -42,7 +42,7 @@ EmitFn = Callable[[dict[str, Any]], None]
 
 
 KNOWN_DEFENSES = ("baseline", "defensive_prompt", "classifier", "tool_validator")
-KNOWN_ATTACK_MODES = ("static", "adaptive_demo", "adaptive_ollama")
+KNOWN_ATTACK_MODES = ("static", "static_published", "adaptive_demo", "adaptive_ollama")
 MODEL_FAILURE_POLICIES = ("mark_invalid", "abort_campaign", "restart_as_separate_demo_campaign")
 
 

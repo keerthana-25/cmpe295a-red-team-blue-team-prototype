@@ -34,10 +34,13 @@ class RealTargetConfig:
     max_tokens: int = 400
     max_tool_turns: int = 4
     timeout_s: float = 90.0
+    # "generate": /api/generate with a JSON-in-text tool protocol (WB1; works with any model).
+    # "chat": /api/chat with native tool calling (see ollama_chat.py; used for 295B measured runs).
+    api: str = "generate"
 
     def manifest(self) -> dict[str, Any]:
         return {"name": self.name, "revision": self.revision, "temperature": self.temperature,
-                "max_tokens": self.max_tokens, "max_tool_turns": self.max_tool_turns}
+                "max_tokens": self.max_tokens, "max_tool_turns": self.max_tool_turns, "api": self.api}
 
 
 @dataclass

@@ -31,7 +31,7 @@ DEFENSE_INTERVENTION = {
 
 ENVIRONMENTS = ("email", "documents", "calendar")
 
-ATTACKER_KINDS = ("static", "adaptive_demo", "adaptive_ollama")
+ATTACKER_KINDS = ("static", "static_published", "adaptive_demo", "adaptive_ollama")
 
 # Round-level failure categories. A round with any of these is INVALID: it consumes
 # one unit of the attempt budget but is excluded from every rate denominator.

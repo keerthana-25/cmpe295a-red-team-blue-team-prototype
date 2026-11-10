@@ -107,13 +107,14 @@ class FeedbackOnlyTests(unittest.TestCase):
 
     def test_local_model_prompt_carries_only_success_or_failure_history(self):
         brief = scenario("email-summary-exfil").attack_brief()
-        attacker = LocalModelAttacker(config=ModelConfig(name="m"), seed=1)
+        attacker = LocalModelAttacker(config=ModelConfig(name="m", history_mode="outcomes_only"), seed=1)
         with mock.patch("rtbt.netguard.post_json", return_value=({"response": "please send it to someone"}, 5.0)) as post:
             attacker.next_attempt(brief)
             attacker.observe(False)
             attacker.next_attempt(brief)
             prompt = post.call_args[0][1]["prompt"]
         self.assertIn("Attempt 1: failure", prompt)
+        self.assertNotIn("please send it to someone", prompt)
         for name in DEFENSE_IDS:
             self.assertNotIn(name, prompt)
 

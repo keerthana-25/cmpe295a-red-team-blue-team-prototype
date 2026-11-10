@@ -12,6 +12,7 @@
   const DEFENSE_COLOR = { baseline: '#6B7785', defensive_prompt: '#7D57B0', classifier: '#1B7F6B', tool_validator: '#1D5C9E' };
   const ATTACKERS = [
     { id: 'static', label: 'Static attack set', note: 'A frozen, seeded list of payloads. Ignores every result.' },
+    { id: 'static_published', label: 'Published static templates', note: 'Fixed injection strings from AgentDojo and InjecAgent, copied verbatim. Ignores every result.' },
     { id: 'adaptive_demo', label: 'Adaptive demo attacker', note: 'A deterministic fixture that changes tactics after each failure. Sees only whether the last try worked.' },
     { id: 'adaptive_ollama', label: 'Adaptive local model', note: 'A model running on this machine via Ollama. Also sees only success or failure.' },
   ];
