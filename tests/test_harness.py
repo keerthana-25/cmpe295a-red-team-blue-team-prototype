@@ -577,14 +577,15 @@ class ExperimentLifecycleTests(unittest.TestCase):
         cfg = ExperimentConfig(defenses=DEFENSE_IDS, attack_modes=("static", "adaptive_demo"), attack_budget=8, seeds=(1, 2))
         events = []
         report = ExperimentRunner(suite=SUITE, config=cfg).run(emit=events.append)
-        self.assertEqual(len(report.campaigns), 9 * 4 * 2 * 2)
+        n = len(SUITE.scenarios)
+        self.assertEqual(len(report.campaigns), n * 4 * 2 * 2)
         self.assertTrue(all(c.status == "complete" for c in report.campaigns))
-        self.assertEqual(len(report.comparison_table()), 144)
+        self.assertEqual(len(report.comparison_table()), n * 4 * 2 * 2)
         self.assertTrue(all(g["matched"] for g in report.matched_budget_report()))
         kinds = {e["type"] for e in events}
         self.assertTrue({"campaign_start", "round", "campaign_complete", "tool_call"} <= kinds)
         starts = [e for e in events if e["type"] == "campaign_start"]
-        self.assertEqual(len({e["campaign_id"] for e in starts}), 144)
+        self.assertEqual(len({e["campaign_id"] for e in starts}), n * 4 * 2 * 2)
         self.assertTrue(all("campaign_id" in e for e in events if e["type"] == "round"))
 
     def test_adaptive_versus_static_comparison_is_paired_and_keeps_null_results(self):

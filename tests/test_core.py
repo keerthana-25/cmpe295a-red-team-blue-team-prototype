@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import copy
 import dataclasses
 import os
@@ -109,7 +110,9 @@ class CalendarAliasTests(unittest.TestCase):
 class ScenarioSchemaTests(unittest.TestCase):
     def test_suite_loads_and_hash_is_stable(self):
         again = load_suite(ROOT / "scenarios")
-        self.assertEqual(len(SUITE.scenarios), 9)
+        listed = json.loads((ROOT / "scenarios" / "suite.json").read_text(encoding="utf-8"))["scenarios"]
+        self.assertEqual(len(SUITE.scenarios), len(listed))  # every listed file loads
+        self.assertGreaterEqual(len(SUITE.scenarios), 16)
         self.assertEqual(SUITE.content_hash(), again.content_hash())
 
     def test_required_categories_present(self):

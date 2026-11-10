@@ -93,7 +93,7 @@ start.py                    one-command launcher (checks, tests, sample run, das
 run_demo.py, run_web.py     command-line and dashboard entry points
 Prototype_Setup_and_Run_Guide.docx    non-technical setup walkthrough (macOS/Windows)
 src/rtbt/                   the platform (see docs/ARCHITECTURE.md)
-scenarios/                  9 scenario files and suite.json
+scenarios/                  16 scenario files and suite.json (suite 0.2.0)
 scripts/                    scenario validation, generation, and human-approval helpers
 configs/                    example experiment configs
 web/                        dashboard (plain HTML, CSS, JavaScript)

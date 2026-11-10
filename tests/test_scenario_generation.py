@@ -11,6 +11,8 @@ import unittest
 
 from _common import ROOT, SUITE
 
+SUITE_LISTED = json.loads((ROOT / "scenarios" / "suite.json").read_text(encoding="utf-8"))["scenarios"]
+
 
 def run(args, cwd):
     return subprocess.run([sys.executable] + args, cwd=cwd, capture_output=True, text=True, timeout=60)
@@ -53,7 +55,7 @@ class ScenarioGenerationTests(unittest.TestCase):
 
         # nothing outside _generated/ changed
         suite_json = json.loads((self.work / "scenarios" / "suite.json").read_text())
-        self.assertEqual(len(suite_json["scenarios"]), 9)
+        self.assertEqual(len(suite_json["scenarios"]), len(SUITE_LISTED))
 
     def test_a_generated_candidate_is_invisible_to_load_suite_until_approved(self):
         run(["scripts/generate_scenario.py", "--seed", "777"], cwd=self.work)
@@ -64,7 +66,7 @@ class ScenarioGenerationTests(unittest.TestCase):
              f"s = load_suite({str(self.work / 'scenarios')!r}); print(len(s.scenarios)); "
              f"print(any('generated' in x.id for x in s.scenarios))"],
             capture_output=True, text=True, timeout=30)
-        self.assertIn("9", result.stdout)
+        self.assertEqual(result.stdout.split()[0], str(len(SUITE_LISTED)))
         self.assertIn("False", result.stdout)
 
     def test_approval_requires_a_reviewer_and_actually_adds_it_to_the_suite(self):

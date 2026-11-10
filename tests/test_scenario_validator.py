@@ -75,7 +75,8 @@ class ScenarioValidatorTests(unittest.TestCase):
                               capture_output=True, text=True, timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stdout)  # a declared, documented exception is not a failure
         self.assertIn("[WARN (approved)] cal-schedule-sync", proc.stdout)
-        self.assertIn("8 of 9 scenarios passed every check outright", proc.stdout)
+        n = len(SUITE.scenarios)
+        self.assertIn(f"{n - 1} of {n} scenarios passed every check outright", proc.stdout)
         self.assertIn("1 passed with a pre-approved, documented warning", proc.stdout)
         self.assertIn("0 failed unexpectedly", proc.stdout)
         self.assertIn("validation_status stays 'unreviewed'", proc.stdout)

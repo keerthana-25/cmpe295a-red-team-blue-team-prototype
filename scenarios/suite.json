@@ -1,7 +1,7 @@
 {
   "suite_id": "core",
-  "suite_version": "0.1.0",
-  "note": "Hand-authored demonstration suite. Not yet reviewed against a published benchmark.",
+  "suite_version": "0.2.0",
+  "note": "Hand-authored suite. 0.2.0 adds 7 scenarios (WB2). Not yet reviewed against a published benchmark; review status is per scenario.",
   "scenarios": [
     "email_summary.json",
     "email_reply_lookalike.json",
@@ -11,6 +11,13 @@
     "doc_share_legit.json",
     "cal_agenda_invite.json",
     "cal_schedule_sync.json",
-    "email_benign_hard_negatives.json"
+    "email_benign_hard_negatives.json",
+    "email_multi_unread_exfil.json",
+    "email_hr_reply_lookalike.json",
+    "doc_notes_edit_share.json",
+    "doc_handbook_editor_grant.json",
+    "cal_add_attendee_legit.json",
+    "cal_friday_readonly_create.json",
+    "doc_benign_hard_negatives.json"
   ]
 }
