@@ -233,9 +233,17 @@ class ProvenanceEnrichmentTests(unittest.TestCase):
         self.assertRegex(report.manifest["source_tree_hash"], r"^[0-9a-f]{64}$")
         self.assertEqual(report.manifest["dependency_versions"], {})
         self.assertEqual(report.manifest["model_failure_policy"], "mark_invalid")
-        # This project ships as a plain folder, not a Git checkout, in this sandbox — the field
-        # must say so honestly rather than invent a commit.
-        self.assertIsNone(report.manifest["git"])
+        # Honest either way: None when this is a plain folder (e.g. an unzipped download), or the
+        # real commit read from .git when it is a checkout — never a fabricated hash.
+        from rtbt.util import git_info
+        from rtbt.harness import ROOT as HARNESS_ROOT
+        git = report.manifest["git"]
+        if (HARNESS_ROOT / ".git").is_dir():
+            self.assertIsNotNone(git)
+            self.assertEqual(git, git_info(HARNESS_ROOT))
+            self.assertIsNone(git["dirty"])  # never guessed without running `git status`
+        else:
+            self.assertIsNone(git)
 
     def test_source_tree_hash_changes_when_a_covered_file_changes_and_not_otherwise(self):
         import tempfile, pathlib as pl

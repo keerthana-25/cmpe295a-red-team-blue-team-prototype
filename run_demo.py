@@ -6,6 +6,13 @@ Usage:
     python3 run_demo.py --config configs/quick_demo.json   # from a config file
     python3 run_demo.py --scenarios email-summary-exfil --defenses baseline,classifier \
         --attack-modes static,adaptive_demo --budget 20 --seeds 1,2,3
+    python3 run_demo.py --config configs/quick_demo.json --db results/runs.db      # checkpoint every campaign
+    python3 run_demo.py --db results/runs.db --resume <run_id>                      # finish an interrupted run
+    python3 run_demo.py --db results/runs.db --list-runs                            # see what the store holds
+
+With --db, every finished campaign is written to the SQLite run store immediately, so a run that
+dies part-way (a closed laptop, an expired Kaggle/Colab GPU session) can be resumed later with
+--resume, on the same or a different machine, without repeating finished campaigns.
 
 Always prints the "Demonstration data only" warning unless every campaign used real
 model components. Exports full JSON and a flat CSV comparison table to results/.
@@ -16,12 +23,16 @@ import argparse
 import csv
 import json
 import sys
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from rtbt.attackers.local_model import ModelConfig  # noqa: E402
+from rtbt.config_io import config_from_dict, config_to_dict  # noqa: E402
+from rtbt.persistence import STATEFUL_ATTACK_MODES, RunStore  # noqa: E402
+from rtbt.reporting import ExperimentReport, campaign_from_dict  # noqa: E402
 from rtbt.harness import ExperimentConfig, ExperimentRunner  # noqa: E402
 from rtbt.scenario_registry import load_suite  # noqa: E402
 from rtbt.util import sha256_file, use_utf8_output, utc_now_iso  # noqa: E402
@@ -48,26 +59,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model-failure-policy", type=str, default="mark_invalid",
                    choices=["mark_invalid", "abort_campaign", "restart_as_separate_demo_campaign"],
                    help="What to do when a model-backed attacker becomes unavailable mid-campaign.")
+    p.add_argument("--db", type=str, default=None,
+                   help="SQLite run store. Each finished campaign is saved immediately so the run can be resumed.")
+    p.add_argument("--run-id", type=str, default=None, help="Name for a new run in --db (default: random 12-hex id).")
+    p.add_argument("--resume", type=str, default=None, metavar="RUN_ID",
+                   help="Finish an unfinished run stored in --db: completed campaigns are reused, the rest are run.")
+    p.add_argument("--list-runs", action="store_true", help="List runs stored in --db and exit.")
     return p.parse_args()
 
 
 def build_config(args: argparse.Namespace) -> ExperimentConfig:
     if args.config:
-        raw = json.loads(Path(args.config).read_text(encoding="utf-8"))
-        model_config = ModelConfig(**raw["model_config"]) if raw.get("model_config") else None
-        real_config = RealTargetConfig(**raw["real_target_config"]) if raw.get("real_target_config") else None
-        return ExperimentConfig(
-            defenses=tuple(raw["defenses"]), attack_modes=tuple(raw["attack_modes"]),
-            attack_budget=raw["attack_budget"], seeds=tuple(raw["seeds"]),
-            target_mode=raw.get("target_mode", "simulated"),
-            scenario_ids=tuple(raw["scenario_ids"]) if raw.get("scenario_ids") else None,
-            model_config=model_config, real_target_config=real_config,
-            classifier_spec=raw.get("classifier_spec"),
-            final_window_fraction=raw.get("final_window_fraction", 0.2),
-            final_window_minimum=raw.get("final_window_minimum", 3),
-            network_allowlist=tuple(raw["network_allowlist"]) if raw.get("network_allowlist") else None,
-            model_failure_policy=raw.get("model_failure_policy", "mark_invalid"),
-        )
+        return config_from_dict(json.loads(Path(args.config).read_text(encoding="utf-8")))
 
     attack_modes = tuple(args.attack_modes.split(","))
     model_config = None
@@ -79,6 +82,61 @@ def build_config(args: argparse.Namespace) -> ExperimentConfig:
         scenario_ids=tuple(args.scenarios.split(",")) if args.scenarios else None, model_config=model_config,
         model_failure_policy=args.model_failure_policy,
     )
+
+
+def run_with_store(store: RunStore, run_id: str, runner: ExperimentRunner, *, reused: list,
+                   skip_ids: frozenset, force_ids: frozenset) -> ExperimentReport:
+    """Run the experiment, checkpointing every campaign into the store as it finishes. A Ctrl-C
+    or a killed GPU session leaves the run 'running'/'interrupted' with every finished campaign
+    already saved; --resume picks up from there."""
+    def emit(event: dict) -> None:
+        if event.get("type") == "campaign_start":
+            store.record_campaign_start(
+                run_id, event["campaign_id"], scenario_id=event["scenario_id"], defense_id=event["defense_id"],
+                attack_mode=event["attack_mode"], target_mode=runner.config.target_mode, seed=event["seed"],
+                attack_budget=event["attack_budget"])
+
+    def on_campaign_complete(campaign) -> None:
+        store.record_campaign_complete(run_id, campaign.campaign_id, campaign.to_dict())
+
+    try:
+        fresh = runner.run(emit=emit, on_campaign_complete=on_campaign_complete,
+                           skip_campaign_ids=skip_ids, force_new_id_for=force_ids)
+    except KeyboardInterrupt:
+        store.update_run_status(run_id, "interrupted")
+        store.log_recovery_decision(run_id, "marked_interrupted_on_startup",
+                                    "CLI run stopped by KeyboardInterrupt; finished campaigns are saved. "
+                                    f"Resume with: run_demo.py --db {store.db_path} --resume {run_id}")
+        print(f"\nInterrupted. Finished campaigns are saved. Resume with:\n  "
+              f"python3 run_demo.py --db {store.db_path} --resume {run_id}")
+        raise SystemExit(130)
+    manifest = dict(fresh.manifest)
+    manifest["run_store"] = {"db_path": str(store.db_path), "run_id": run_id,
+                             "reused_campaign_ids": sorted(c.campaign_id for c in reused)}
+    report = ExperimentReport(experiment_id=fresh.experiment_id, manifest=manifest, campaigns=list(reused) + fresh.campaigns)
+    store.save_manifest(run_id, report.experiment_id, report.manifest)
+    store.update_run_status(run_id, "cancelled" if runner.cancel_token.is_cancelled() else "complete")
+    return report
+
+
+def prepare_resume(store: RunStore, run_id: str) -> tuple[ExperimentConfig, list, frozenset, frozenset]:
+    run = store.get_run(run_id)
+    if run is None:
+        raise SystemExit(f"No run '{run_id}' in {store.db_path}. Use --list-runs to see stored runs.")
+    if run["status"] in ("complete", "abandoned"):
+        raise SystemExit(f"Run '{run_id}' is {run['status']!r}; there is nothing to resume.")
+    config = config_from_dict(run["config"])
+    plan = store.recovery_plan(run_id)
+    rows = {c["campaign_id"]: c for c in store.get_campaigns(run_id)}
+    reused = [campaign_from_dict(rows[cid]["result"]) for cid in plan["completed_campaign_ids"] if rows[cid]["result"]]
+    skip_ids = frozenset(c.campaign_id for c in reused)
+    force_ids = frozenset(plan["incomplete_needs_new_id"])
+    store.log_recovery_decision(
+        run_id, "resume",
+        f"Resumed in place by run_demo.py: reused {len(skip_ids)} completed campaign(s); "
+        f"{len(force_ids)} incomplete stateful campaign(s) ({', '.join(STATEFUL_ATTACK_MODES)}) re-run under a new id.")
+    store.update_run_status(run_id, "running")
+    return config, reused, skip_ids, force_ids
 
 
 def print_comparison_table(rows: list[dict]) -> None:
@@ -124,15 +182,41 @@ def export(report, out_dir: Path) -> tuple[Path, Path]:
 def main() -> None:
     use_utf8_output()
     args = parse_args()
+    if (args.resume or args.list_runs or args.run_id) and not args.db:
+        raise SystemExit("--resume, --list-runs and --run-id need --db PATH (the SQLite run store).")
+    store = RunStore(args.db) if args.db else None
+    if args.list_runs:
+        for r in store.list_runs():
+            done = sum(1 for c in store.get_campaigns(r["run_id"]) if c["status"] == "complete")
+            print(f"{r['run_id']}  {r['status']:11}  campaigns_complete={done}  updated={r['updated_at']}")
+        return
+
     suite = load_suite(args.suite_dir)
-    config = build_config(args)
+    reused: list = []
+    skip_ids: frozenset = frozenset()
+    force_ids: frozenset = frozenset()
+    if args.resume:
+        run_id = args.resume
+        config, reused, skip_ids, force_ids = prepare_resume(store, run_id)
+        print(f"Resuming run {run_id}: {len(reused)} campaign(s) already complete and reused.")
+    else:
+        config = build_config(args)
+        run_id = args.run_id or uuid.uuid4().hex[:12]
+        if store:
+            config.validate(suite)
+            store.create_run(run_id, config_to_dict(config))
+            print(f"Run id {run_id} — checkpointing every campaign to {store.db_path}")
 
     print(f"Suite '{suite.suite_id}' v{suite.version} — {len(suite.scenarios)} scenario(s) loaded "
           f"({len(suite.primary())} in the primary set).")
     print(f"Running: defenses={config.defenses} attack_modes={config.attack_modes} "
           f"budget={config.attack_budget} seeds={config.seeds} target_mode={config.target_mode}\n")
 
-    report = ExperimentRunner(suite=suite, config=config).run()
+    runner = ExperimentRunner(suite=suite, config=config)
+    if store:
+        report = run_with_store(store, run_id, runner, reused=reused, skip_ids=skip_ids, force_ids=force_ids)
+    else:
+        report = runner.run()
 
     prov = report.provenance_summary()
     if prov["demonstration_warning"]:

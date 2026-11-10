@@ -8,7 +8,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .metrics import compute_campaign_metrics, matched_budget_ok
-from .schemas import PLATFORM_VERSION, SCHEMA_VERSION, RoundRecord, eligible_as_research_evidence, evidence_status_for_campaign
+from .schemas import (PLATFORM_VERSION, SCHEMA_VERSION, OracleResult, RoundRecord, ToolCallRecord,
+                      eligible_as_research_evidence, evidence_status_for_campaign)
 
 DEMO_WARNING = "Demonstration data only. These results are not research evidence."
 DEMO_PROVENANCE = {"simulated_deterministic_v1", "deterministic_demo_v1", "demonstration"}
@@ -168,3 +169,38 @@ class ExperimentReport:
                 "pricing_source": c.cost.get("pricing_source"),
             })
         return rows
+
+
+# ---------------------------------------------------------------------------------------
+# Rebuilding results from their JSON form (run store, exported reports)
+# ---------------------------------------------------------------------------------------
+# Everything a CampaignResult knows is in its to_dict() output, so a campaign saved to the run
+# store by one process (e.g. a headless Kaggle session) can be rebuilt by another (a laptop
+# dashboard) and produce byte-identical metrics. Derived fields in the dict (metrics,
+# evidence_status, eligible_as_research_evidence) are deliberately NOT read back: they are
+# recomputed from the rounds, so a stored label can never upgrade what the rounds actually show.
+def _round_from_dict(d: dict[str, Any]) -> RoundRecord:
+    d = dict(d)
+    d["tool_calls"] = [ToolCallRecord(**tc) for tc in d.get("tool_calls", [])]
+    d["oracle"] = OracleResult(**d["oracle"])
+    return RoundRecord(**d)
+
+
+def campaign_from_dict(d: dict[str, Any]) -> CampaignResult:
+    return CampaignResult(
+        campaign_id=d["campaign_id"], scenario_id=d["scenario_id"], scenario_version=d["scenario_version"],
+        environment=d["environment"], defense_id=d["defense_id"], attack_mode=d["attack_mode"],
+        target_mode=d["target_mode"], seed=d["seed"], attack_budget=d["attack_budget"], status=d["status"],
+        rounds=[_round_from_dict(r) for r in d.get("rounds", [])],
+        attacker_stats=d.get("attacker_stats", {}), defense_describe=d.get("defense", {}),
+        started_at=d.get("started_at", ""), ended_at=d.get("ended_at", ""),
+        abort_reason=d.get("abort_reason"), needs_demo_fallback=d.get("needs_demo_fallback", False),
+        is_demo_fallback=d.get("is_demo_fallback", False), fallback_of=d.get("fallback_of"),
+        cost=d.get("cost", {}),
+    )
+
+
+def report_from_dict(d: dict[str, Any]) -> ExperimentReport:
+    """Inverse of ExperimentReport.to_dict() (for exported JSON reports)."""
+    return ExperimentReport(experiment_id=d["experiment_id"], manifest=d.get("manifest", {}),
+                            campaigns=[campaign_from_dict(c) for c in d.get("campaigns", [])])

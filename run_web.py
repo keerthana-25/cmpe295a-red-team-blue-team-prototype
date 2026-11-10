@@ -28,13 +28,13 @@ from urllib.parse import parse_qs, unquote, urlparse
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from rtbt.attackers.local_model import ModelConfig  # noqa: E402
 from rtbt.harness import CancelToken, ExperimentConfig, ExperimentRunner, derive_campaign_id  # noqa: E402
-from rtbt.persistence import RunStore  # noqa: E402
+from rtbt.config_io import config_from_dict, config_to_dict  # noqa: E402
+from rtbt.persistence import RunStore, rebuild_report  # noqa: E402
+from rtbt.reporting import ExperimentReport, campaign_from_dict  # noqa: E402
 from rtbt.scenario_registry import load_suite  # noqa: E402
 from rtbt.schemas import ConfigurationError  # noqa: E402
 from rtbt.statistics import excluded_runs_report, static_vs_adaptive, summarize  # noqa: E402
-from rtbt.target_agents.real_model import RealTargetConfig  # noqa: E402
 
 WEB_DIR = ROOT / "web"
 SUITE_DIR = ROOT / "scenarios"
@@ -54,21 +54,33 @@ def _new_run() -> str:
 
 
 def _config_from_payload(payload: dict) -> ExperimentConfig:
-    model_config = ModelConfig(**payload["model_config"]) if payload.get("model_config") else None
-    real_config = RealTargetConfig(**payload["real_target_config"]) if payload.get("real_target_config") else None
-    return ExperimentConfig(
-        defenses=tuple(payload.get("defenses", ["baseline", "defensive_prompt", "classifier", "tool_validator"])),
-        attack_modes=tuple(payload.get("attack_modes", ["static", "adaptive_demo"])),
-        attack_budget=int(payload.get("attack_budget", 15)),
-        seeds=tuple(payload.get("seeds", [1, 2, 3])),
-        target_mode=payload.get("target_mode", "simulated"),
-        scenario_ids=tuple(payload["scenario_ids"]) if payload.get("scenario_ids") else None,
-        model_config=model_config, real_target_config=real_config,
-        classifier_spec=payload.get("classifier_spec"),
-        final_window_fraction=payload.get("final_window_fraction", 0.2),
-        final_window_minimum=payload.get("final_window_minimum", 3),
-        network_allowlist=tuple(payload["network_allowlist"]) if payload.get("network_allowlist") else None,
-    )
+    # One parser for both entry points (see rtbt/config_io.py). The dashboard's default budget
+    # stays 15, as before; the CLI's is 20.
+    return config_from_dict(payload, default_budget=15)
+
+
+def load_persisted_runs(store: RunStore = None) -> list[str]:
+    """Make finished runs from earlier processes visible again. A run that completed in a
+    headless CLI or Kaggle/Colab session (run_demo.py --db) or before the dashboard was
+    restarted is rebuilt from the run store, so every comparison, stats and CSV endpoint works on
+    it exactly as on a live run. Only 'complete' and 'cancelled' runs are imported; interrupted
+    runs stay on the recovery path instead of being shown as if they were finished."""
+    store = store or STORE
+    imported = []
+    for r in store.list_runs():
+        if r["status"] not in ("complete", "cancelled") or r["run_id"] in RUNS:
+            continue
+        try:
+            report = rebuild_report(store, r["run_id"])
+        except Exception as exc:  # one corrupt row must not stop the dashboard from starting
+            print(f"Skipped stored run {r['run_id']}: {exc}", flush=True)
+            continue
+        with _LOCK:
+            RUNS[r["run_id"]] = {"status": r["status"], "events": [], "report": report, "error": None,
+                                 "cancel_token": CancelToken(), "campaigns_total": len(report.campaigns),
+                                 "imported_from_store": True}
+        imported.append(r["run_id"])
+    return imported
 
 
 def _background_run(run_id: str, config: ExperimentConfig, *, skip_campaign_ids=frozenset(), force_new_id_for=frozenset()) -> None:
@@ -94,6 +106,16 @@ def _background_run(run_id: str, config: ExperimentConfig, *, skip_campaign_ids=
         runner = ExperimentRunner(suite=suite, config=config, cancel_token=state["cancel_token"])
         report = runner.run(emit=emit, on_campaign_complete=on_campaign_complete,
                             skip_campaign_ids=skip_campaign_ids, force_new_id_for=force_new_id_for)
+        if skip_campaign_ids:
+            # A resumed run's report must include the campaigns reused from before the
+            # interruption (copied into this run's own rows by the recover handler); before this
+            # fix the report silently held only the campaigns re-run after the crash.
+            reused = [campaign_from_dict(c["result"]) for c in STORE.get_campaigns(run_id)
+                      if c["campaign_id"] in skip_campaign_ids and c["result"]]
+            manifest = {**report.manifest, "reused_campaign_ids": sorted(c.campaign_id for c in reused)}
+            report = ExperimentReport(experiment_id=report.experiment_id, manifest=manifest,
+                                      campaigns=reused + report.campaigns)
+        STORE.save_manifest(run_id, report.experiment_id, report.manifest)
         with _LOCK:
             state["report"] = report
             state["status"] = "cancelled" if state["cancel_token"].is_cancelled() else "complete"
@@ -350,7 +372,7 @@ class Handler(BaseHTTPRequestHandler):
                 config = _config_from_payload(payload)
                 config.validate(_suite())  # reject bad configs with a 400 now, not a silent failure later
                 run_id = _new_run()
-                STORE.create_run(run_id, payload)
+                STORE.create_run(run_id, config_to_dict(config))  # same shape the CLI writes, so either can resume it
                 with _LOCK:
                     RUNS[run_id] = {"status": "running", "events": [], "report": None, "error": None,
                                     "cancel_token": CancelToken(), "campaigns_total": None}
@@ -454,6 +476,9 @@ def main() -> None:
               f"finish cleanly: {recovered}. See the Provenance view's recovery options, or "
               f"POST /api/experiments/<id>/recover with {{\"decision\": \"resume\"|\"restart\"|\"abandon\"}}.",
               flush=True)
+    imported = load_persisted_runs()
+    if imported:
+        print(f"Loaded {len(imported)} finished run(s) from {DB_PATH}.", flush=True)
     url = f"http://{args.host}:{args.port}"
     print(f"Red Team vs. Blue Team prototype dashboard running at {url}", flush=True)
     print("Ctrl+C to stop.", flush=True)

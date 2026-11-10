@@ -44,6 +44,12 @@ CREATE TABLE IF NOT EXISTS campaigns (
     started_at TEXT, ended_at TEXT,
     PRIMARY KEY (run_id, campaign_id)
 );
+CREATE TABLE IF NOT EXISTS run_manifests (
+    run_id TEXT PRIMARY KEY,   -- one row per finished run, written after the report is built
+    experiment_id TEXT NOT NULL,
+    manifest_json TEXT NOT NULL,
+    saved_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS recovery_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id TEXT NOT NULL,
@@ -113,7 +119,22 @@ class RunStore:
                               (run_id, decision, note, utc_now_iso()))
             self._conn.commit()
 
+    def save_manifest(self, run_id: str, experiment_id: str, manifest: dict[str, Any]) -> None:
+        """Store the reproducibility manifest of a finished run so another process (e.g. a laptop
+        dashboard opening a runs.db copied from a GPU session) can rebuild the full report."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO run_manifests (run_id, experiment_id, manifest_json, saved_at) VALUES (?, ?, ?, ?)",
+                (run_id, experiment_id, json.dumps(manifest), utc_now_iso()))
+            self._conn.commit()
+
     # ------------------------------------------------------------------ reads
+    def get_manifest(self, run_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT experiment_id, manifest_json FROM run_manifests WHERE run_id = ?", (run_id,)).fetchone()
+        return {"experiment_id": row[0], "manifest": json.loads(row[1])} if row else None
+
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
@@ -175,3 +196,29 @@ class RunStore:
             "incomplete_needs_new_id": [c["campaign_id"] for c in incomplete if c["attack_mode"] in STATEFUL_ATTACK_MODES],
             "incomplete_safe_same_id": [c["campaign_id"] for c in incomplete if c["attack_mode"] not in STATEFUL_ATTACK_MODES],
         }
+
+
+def rebuild_report(store: RunStore, run_id: str):
+    """Rebuild an ExperimentReport for ``run_id`` from the run store alone: every completed
+    campaign's stored result plus the saved manifest. Campaigns that never completed are left out
+    (they have no result) and the manifest says how many were missing, so an imported partial run
+    can never pass itself off as a finished one."""
+    from .reporting import ExperimentReport, campaign_from_dict  # local import: reporting must not depend on this module
+
+    run = store.get_run(run_id)
+    if run is None:
+        raise KeyError(run_id)
+    rows = store.get_campaigns(run_id)
+    campaigns = [campaign_from_dict(c["result"]) for c in rows if c["status"] == "complete" and c["result"]]
+    saved = store.get_manifest(run_id)
+    if saved:
+        experiment_id, manifest = saved["experiment_id"], dict(saved["manifest"])
+    else:
+        experiment_id = f"exp-rebuilt-{run_id}"
+        manifest = {"note": "No manifest was saved for this run (it did not finish); rebuilt from stored campaigns only.",
+                    "config": run["config"]}
+    manifest["rebuilt_from_run_store"] = {
+        "db_path": str(store.db_path), "run_id": run_id, "run_status": run["status"],
+        "campaigns_complete": len(campaigns), "campaigns_incomplete": len(rows) - len(campaigns),
+    }
+    return ExperimentReport(experiment_id=experiment_id, manifest=manifest, campaigns=campaigns)
